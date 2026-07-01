@@ -71,7 +71,11 @@ fn hegelRustBuildStep(
             "set -eu\n" ++
                 "if [ ! -d '{0s}/.jj' ] && [ ! -d '{0s}/.git' ]; then\n" ++
                 "  mkdir -p .deps\n" ++
-                "  jj git clone {1s} '{0s}'\n" ++
+                "  if command -v jj >/dev/null 2>&1; then\n" ++
+                "    jj git clone {1s} '{0s}'\n" ++
+                "  else\n" ++
+                "    git clone {1s} '{0s}'\n" ++
+                "  fi\n" ++
                 "fi\n",
             .{ hegel_rust_path, hegel_rust_url },
         );
