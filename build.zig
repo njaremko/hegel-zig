@@ -11,7 +11,17 @@ pub fn build(b: *std.Build) void {
         "hegel-rust-path",
         "Path to a checkout of git@github.com:hegeldev/hegel-rust.git",
     );
-    const hegel_rust_path = hegel_rust_path_option orelse ".deps/hegel-rust";
+    // Resolve the hegel-rust checkout relative to this package's build root,
+    // not the consumer's cwd. A bare relative path resolves against whichever
+    // `zig build` invocation runs the cargo/clone step, so when this package is
+    // imported from another package the checkout would be cloned into the
+    // consumer's tree. Rooting it here makes the default work standalone and as
+    // a dependency; an explicitly absolute --hegel-rust-path is honored as-is.
+    const hegel_rust_path_rel = hegel_rust_path_option orelse ".deps/hegel-rust";
+    const hegel_rust_path = if (std.fs.path.isAbsolute(hegel_rust_path_rel))
+        hegel_rust_path_rel
+    else
+        b.pathJoin(&.{ b.build_root.path orelse ".", hegel_rust_path_rel });
 
     const hegel_build = hegelRustBuildStep(b, hegel_rust_path, hegel_rust_path_option == null);
     const hegel_lib = hegelRustStaticLibraryPath(b, hegel_rust_path, target.result);
@@ -22,6 +32,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     linkHegel(mod, hegel_lib);
+
+    // Expose the hegel-rust static-library build as a named step so downstream
+    // packages that import the `hegel_zig` module can depend on it before
+    // linking. Importing the module carries the object-file path but not the
+    // step that produces the file, so consumers must depend on this step.
+    const hegel_rust_step = b.step("hegel-rust", "Build the hegel-rust static C library");
+    hegel_rust_step.dependOn(hegel_build);
 
     const exe = b.addExecutable(.{
         .name = "hegel_zig_example",
@@ -110,6 +127,11 @@ fn hegelRustStaticLibraryPath(
 }
 
 fn linkHegel(module: *std.Build.Module, hegel_lib: []const u8) void {
+    // `hegel_lib` is an absolute path rooted at this package's build root (see
+    // `build`). A `cwd_relative` LazyPath resolves against the cwd of the
+    // linking invocation, but an absolute sub-path wins over that cwd, so the
+    // object file resolves correctly whether this module is used standalone or
+    // imported from another package.
     module.addObjectFile(.{ .cwd_relative = hegel_lib });
     module.linkSystemLibrary("c", .{});
 }
