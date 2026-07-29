@@ -34,7 +34,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    linkHegel(mod, hegel_lib);
+    linkHegel(mod, hegel_lib, target);
 
     // Expose the hegel-rust static-library build as a named step so downstream
     // packages that import the `hegel_zig` module can depend on it before
@@ -129,7 +129,11 @@ fn hegelRustStaticLibraryPath(
     return b.pathJoin(&.{ hegel_rust_path, "target", "release", lib_name });
 }
 
-fn linkHegel(module: *std.Build.Module, hegel_lib: []const u8) void {
+fn linkHegel(
+    module: *std.Build.Module,
+    hegel_lib: []const u8,
+    target: std.Build.ResolvedTarget,
+) void {
     // `hegel_lib` is an absolute path rooted at this package's build root (see
     // `build`). A `cwd_relative` LazyPath resolves against the cwd of the
     // linking invocation, but an absolute sub-path wins over that cwd, so the
@@ -137,4 +141,5 @@ fn linkHegel(module: *std.Build.Module, hegel_lib: []const u8) void {
     // imported from another package.
     module.addObjectFile(.{ .cwd_relative = hegel_lib });
     module.linkSystemLibrary("c", .{});
+    if (target.result.os.tag == .linux) module.linkSystemLibrary("unwind", .{});
 }
