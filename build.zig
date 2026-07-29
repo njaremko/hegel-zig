@@ -26,8 +26,14 @@ pub fn build(b: *std.Build) void {
             hegel_rust_path_rel,
         });
 
-    const hegel_build = hegelRustBuildStep(b, hegel_rust_path, hegel_rust_path_option == null);
-    const hegel_lib = hegelRustStaticLibraryPath(b, hegel_rust_path, target.result);
+    const hegel_target_dir = hegelRustTargetDir(b, hegel_rust_path, target.result);
+    const hegel_build = hegelRustBuildStep(
+        b,
+        hegel_rust_path,
+        hegel_target_dir,
+        hegel_rust_path_option == null,
+    );
+    const hegel_lib = hegelRustStaticLibraryPath(b, hegel_target_dir, target.result);
 
     const mod = b.addModule("hegel_zig", .{
         .root_source_file = b.path("src/root.zig"),
@@ -83,6 +89,7 @@ pub fn build(b: *std.Build) void {
 fn hegelRustBuildStep(
     b: *std.Build,
     hegel_rust_path: []const u8,
+    hegel_target_dir: []const u8,
     should_clone_if_missing: bool,
 ) *std.Build.Step {
     var previous: ?*std.Build.Step = null;
@@ -112,6 +119,8 @@ fn hegelRustBuildStep(
         "--release",
         "--manifest-path",
         manifest_path,
+        "--target-dir",
+        hegel_target_dir,
     });
     if (previous) |step| cargo.step.dependOn(step);
     return &cargo.step;
@@ -119,14 +128,29 @@ fn hegelRustBuildStep(
 
 fn hegelRustStaticLibraryPath(
     b: *std.Build,
-    hegel_rust_path: []const u8,
+    hegel_target_dir: []const u8,
     target: std.Target,
 ) []const u8 {
     const lib_name = switch (target.os.tag) {
         .windows => "hegel_c.lib",
         else => "libhegel_c.a",
     };
-    return b.pathJoin(&.{ hegel_rust_path, "target", "release", lib_name });
+    return b.pathJoin(&.{ hegel_target_dir, "release", lib_name });
+}
+
+fn hegelRustTargetDir(
+    b: *std.Build,
+    hegel_rust_path: []const u8,
+    target: std.Target,
+) []const u8 {
+    // Cargo's default target directory is shared by host platforms. Keep the
+    // archive and its object files separated so a Linux VM cannot link a
+    // previously built Darwin archive (or vice versa).
+    const target_name = b.fmt(
+        "target-{s}-{s}-{s}",
+        .{ @tagName(target.os.tag), @tagName(target.cpu.arch), @tagName(target.abi) },
+    );
+    return b.pathJoin(&.{ hegel_rust_path, target_name });
 }
 
 fn linkHegel(
