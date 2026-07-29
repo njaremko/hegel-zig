@@ -21,7 +21,10 @@ pub fn build(b: *std.Build) void {
     const hegel_rust_path = if (std.fs.path.isAbsolute(hegel_rust_path_rel))
         hegel_rust_path_rel
     else
-        b.pathJoin(&.{ b.build_root.path orelse ".", hegel_rust_path_rel });
+        b.pathJoin(&.{
+            b.root.toString(b.graph.arena) catch @panic("OOM"),
+            hegel_rust_path_rel,
+        });
 
     const hegel_build = hegelRustBuildStep(b, hegel_rust_path, hegel_rust_path_option == null);
     const hegel_lib = hegelRustStaticLibraryPath(b, hegel_rust_path, target.result);
@@ -59,18 +62,18 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the example");
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
+    run_cmd.addPassthruArgs();
     run_step.dependOn(&run_cmd.step);
 
     const mod_tests = b.addTest(.{ .root_module = mod });
     mod_tests.step.dependOn(hegel_build);
     const run_mod_tests = b.addRunArtifact(mod_tests);
-    if (b.args) |args| run_mod_tests.addArgs(args);
+    run_mod_tests.addPassthruArgs();
 
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
     exe_tests.step.dependOn(hegel_build);
     const run_exe_tests = b.addRunArtifact(exe_tests);
-    if (b.args) |args| run_exe_tests.addArgs(args);
+    run_exe_tests.addPassthruArgs();
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
