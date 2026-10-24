@@ -399,14 +399,14 @@ fn applySettings(
         .unset => {},
         .disabled => try checkRc(ctx, c.hegel_settings_set_database(ctx, settings_handle, "")),
         .path => |path| {
-            const z_path = try allocator.dupeZ(u8, path);
+            const z_path = try allocator.dupeSentinel(u8, path, 0);
             defer allocator.free(z_path);
             try checkRc(ctx, c.hegel_settings_set_database(ctx, settings_handle, z_path.ptr));
         },
     }
 
     if (settings.database_key) |key| {
-        const z_key = try allocator.dupeZ(u8, key);
+        const z_key = try allocator.dupeSentinel(u8, key, 0);
         defer allocator.free(z_key);
         try checkRc(ctx, c.hegel_settings_set_database_key(ctx, settings_handle, z_key.ptr));
     }
@@ -531,14 +531,14 @@ fn typeNeedsDeinit(comptime T: type) bool {
         .error_union => |err_union| typeNeedsDeinit(err_union.payload),
         .array => |array| typeNeedsDeinit(array.child),
         .@"struct" => |s| blk: {
-            inline for (s.fields) |meta_field| {
-                if (typeNeedsDeinit(meta_field.type)) break :blk true;
+            inline for (s.field_types) |field_type| {
+                if (typeNeedsDeinit(field_type)) break :blk true;
             }
             break :blk false;
         },
         .@"union" => |u| blk: {
-            inline for (u.fields) |union_field| {
-                if (typeNeedsDeinit(union_field.type)) break :blk true;
+            inline for (u.field_types) |field_type| {
+                if (typeNeedsDeinit(field_type)) break :blk true;
             }
             break :blk false;
         },
@@ -553,14 +553,14 @@ fn typeContainsPointer(comptime T: type) bool {
         .error_union => |err_union| typeContainsPointer(err_union.payload),
         .array => |array| typeContainsPointer(array.child),
         .@"struct" => |s| blk: {
-            inline for (s.fields) |meta_field| {
-                if (typeContainsPointer(meta_field.type)) break :blk true;
+            inline for (s.field_types) |field_type| {
+                if (typeContainsPointer(field_type)) break :blk true;
             }
             break :blk false;
         },
         .@"union" => |u| blk: {
-            inline for (u.fields) |union_field| {
-                if (typeContainsPointer(union_field.type)) break :blk true;
+            inline for (u.field_types) |field_type| {
+                if (typeContainsPointer(field_type)) break :blk true;
             }
             break :blk false;
         },
@@ -611,8 +611,8 @@ fn generatedEqual(comptime T: type, left: T, right: T) bool {
             break :blk true;
         },
         .@"struct" => |s| blk: {
-            inline for (s.fields) |meta_field| {
-                if (!generatedEqual(meta_field.type, @field(left, meta_field.name), @field(right, meta_field.name))) {
+            inline for (s.field_names, s.field_types) |field_name, field_type| {
+                if (!generatedEqual(field_type, @field(left, field_name), @field(right, field_name))) {
                     break :blk false;
                 }
             }
@@ -673,8 +673,8 @@ fn defaultDeinitValue(allocator: std.mem.Allocator, value: anytype) void {
             for (&value.*) |*item| defaultDeinitValue(allocator, item);
         },
         .@"struct" => |s| {
-            inline for (s.fields) |meta_field| {
-                defaultDeinitValue(allocator, &@field(value.*, meta_field.name));
+            inline for (s.field_names) |field_name| {
+                defaultDeinitValue(allocator, &@field(value.*, field_name));
             }
         },
         .@"union" => |u| {
@@ -1314,25 +1314,25 @@ pub fn TupleGenerator(comptime Gens: type) type {
             }
             var result: Value = undefined;
             var initialized: usize = 0;
-            errdefer inline for (std.meta.fields(Gens), 0..) |meta_field, i| {
+            errdefer inline for (comptime std.meta.fieldNames(Gens), 0..) |field_name, i| {
                 if (initialized > i) {
                     rootDeinitValue(
-                        @field(self.gens, meta_field.name),
+                        @field(self.gens, field_name),
                         tc.allocator,
                         &@field(result, std.fmt.comptimePrint("{}", .{i})),
                     );
                 }
             };
-            inline for (std.meta.fields(Gens), 0..) |meta_field, i| {
-                @field(result, std.fmt.comptimePrint("{}", .{i})) = try tc.draw(@field(self.gens, meta_field.name));
+            inline for (comptime std.meta.fieldNames(Gens), 0..) |field_name, i| {
+                @field(result, std.fmt.comptimePrint("{}", .{i})) = try tc.draw(@field(self.gens, field_name));
                 initialized += 1;
             }
             return result;
         }
 
         pub fn deinitValue(self: @This(), allocator: std.mem.Allocator, value: *Value) void {
-            inline for (std.meta.fields(Gens), 0..) |meta_field, i| {
-                rootDeinitValue(@field(self.gens, meta_field.name), allocator, &@field(value.*, std.fmt.comptimePrint("{}", .{i})));
+            inline for (comptime std.meta.fieldNames(Gens), 0..) |field_name, i| {
+                rootDeinitValue(@field(self.gens, field_name), allocator, &@field(value.*, std.fmt.comptimePrint("{}", .{i})));
             }
         }
 
@@ -1341,8 +1341,8 @@ pub fn TupleGenerator(comptime Gens: type) type {
             try encoder.map(2);
             try encoder.fieldText("type", "tuple");
             try encoder.text("elements");
-            try encoder.array(std.meta.fields(Gens).len);
-            inline for (std.meta.fields(Gens)) |meta_field| try @field(self.gens, meta_field.name).writeSchema(encoder);
+            try encoder.array(std.meta.fieldNames(Gens).len);
+            inline for (comptime std.meta.fieldNames(Gens)) |field_name| try @field(self.gens, field_name).writeSchema(encoder);
         }
 
         pub fn parseValue(self: @This(), allocator: std.mem.Allocator, value: cbor.Value) HegelError!Value {
@@ -1354,20 +1354,20 @@ pub fn TupleGenerator(comptime Gens: type) type {
                 .array => |array| array,
                 else => return HegelError.UnexpectedEngineValue,
             };
-            if (items.len != std.meta.fields(Gens).len) return HegelError.UnexpectedEngineValue;
+            if (items.len != std.meta.fieldNames(Gens).len) return HegelError.UnexpectedEngineValue;
             var result: Value = undefined;
             var initialized: usize = 0;
-            errdefer inline for (std.meta.fields(Gens), 0..) |meta_field, i| {
+            errdefer inline for (comptime std.meta.fieldNames(Gens), 0..) |field_name, i| {
                 if (initialized > i) {
                     rootDeinitValue(
-                        @field(self.gens, meta_field.name),
+                        @field(self.gens, field_name),
                         allocator,
                         &@field(result, std.fmt.comptimePrint("{}", .{i})),
                     );
                 }
             };
-            inline for (std.meta.fields(Gens), 0..) |meta_field, i| {
-                @field(result, std.fmt.comptimePrint("{}", .{i})) = try parseGeneratedValue(@field(self.gens, meta_field.name), allocator, items[i]);
+            inline for (comptime std.meta.fieldNames(Gens), 0..) |field_name, i| {
+                @field(result, std.fmt.comptimePrint("{}", .{i})) = try parseGeneratedValue(@field(self.gens, field_name), allocator, items[i]);
                 initialized += 1;
             }
             return result;
@@ -1380,23 +1380,23 @@ pub fn tuples(gens: anytype) TupleGenerator(@TypeOf(gens)) {
 }
 
 fn TupleValue(comptime Gens: type) type {
-    const fields = std.meta.fields(Gens);
-    comptime var types: [fields.len]type = undefined;
-    inline for (fields, 0..) |meta_field, i| types[i] = @TypeOf(@field(@as(Gens, undefined), meta_field.name)).Value;
-    return std.meta.Tuple(&types);
+    const field_names = comptime std.meta.fieldNames(Gens);
+    comptime var types: [field_names.len]type = undefined;
+    inline for (field_names, 0..) |field_name, i| types[i] = @TypeOf(@field(@as(Gens, undefined), field_name)).Value;
+    return @Tuple(&types);
 }
 
 fn allSchemaBacked(comptime Gens: type) bool {
-    inline for (std.meta.fields(Gens)) |meta_field| {
-        const Gen = @TypeOf(@field(@as(Gens, undefined), meta_field.name));
+    inline for (comptime std.meta.fieldNames(Gens)) |field_name| {
+        const Gen = @TypeOf(@field(@as(Gens, undefined), field_name));
         if (!isSchemaBacked(Gen)) return false;
     }
     return true;
 }
 
 fn allPreserveEquality(comptime Gens: type) bool {
-    inline for (std.meta.fields(Gens)) |meta_field| {
-        const Gen = @TypeOf(@field(@as(Gens, undefined), meta_field.name));
+    inline for (comptime std.meta.fieldNames(Gens)) |field_name| {
+        const Gen = @TypeOf(@field(@as(Gens, undefined), field_name));
         if (!preservesEquality(Gen)) return false;
     }
     return true;
@@ -1684,13 +1684,13 @@ pub fn OneOfGenerator(comptime Gens: type) type {
                 const index = try parseInteger(usize, items[0]);
                 return self.parseBranch(tc.allocator, index, items[1]);
             }
-            const index_gen = try integers(usize, .{ .min_value = 0, .max_value = std.meta.fields(Gens).len - 1 });
+            const index_gen = try integers(usize, .{ .min_value = 0, .max_value = std.meta.fieldNames(Gens).len - 1 });
             const index = try tc.draw(index_gen);
             return self.drawBranch(tc, index);
         }
 
         pub fn deinitValue(self: @This(), allocator: std.mem.Allocator, value: *Value) void {
-            rootDeinitValue(@field(self.gens, std.meta.fields(Gens)[0].name), allocator, value);
+            rootDeinitValue(@field(self.gens, std.meta.fieldNames(Gens)[0]), allocator, value);
         }
 
         pub fn writeSchema(self: @This(), encoder: *cbor.Encoder) cbor.Error!void {
@@ -1698,8 +1698,8 @@ pub fn OneOfGenerator(comptime Gens: type) type {
             try encoder.map(2);
             try encoder.fieldText("type", "one_of");
             try encoder.text("generators");
-            try encoder.array(std.meta.fields(Gens).len);
-            inline for (std.meta.fields(Gens)) |meta_field| try @field(self.gens, meta_field.name).writeSchema(encoder);
+            try encoder.array(std.meta.fieldNames(Gens).len);
+            inline for (comptime std.meta.fieldNames(Gens)) |field_name| try @field(self.gens, field_name).writeSchema(encoder);
         }
 
         pub fn parseValue(self: @This(), allocator: std.mem.Allocator, value: cbor.Value) HegelError!Value {
@@ -1713,15 +1713,15 @@ pub fn OneOfGenerator(comptime Gens: type) type {
         }
 
         fn parseBranch(self: @This(), allocator: std.mem.Allocator, index: usize, value: cbor.Value) HegelError!Value {
-            inline for (std.meta.fields(Gens), 0..) |meta_field, i| {
-                if (index == i) return parseGeneratedValue(@field(self.gens, meta_field.name), allocator, value);
+            inline for (comptime std.meta.fieldNames(Gens), 0..) |field_name, i| {
+                if (index == i) return parseGeneratedValue(@field(self.gens, field_name), allocator, value);
             }
             return HegelError.UnexpectedEngineValue;
         }
 
         fn drawBranch(self: @This(), tc: *TestCase, index: usize) HegelError!Value {
-            inline for (std.meta.fields(Gens), 0..) |meta_field, i| {
-                if (index == i) return tc.draw(@field(self.gens, meta_field.name));
+            inline for (comptime std.meta.fieldNames(Gens), 0..) |field_name, i| {
+                if (index == i) return tc.draw(@field(self.gens, field_name));
             }
             return HegelError.UnexpectedEngineValue;
         }
@@ -1729,7 +1729,7 @@ pub fn OneOfGenerator(comptime Gens: type) type {
 }
 
 pub fn oneOf(gens: anytype) HegelError!OneOfGenerator(@TypeOf(gens)) {
-    if (std.meta.fields(@TypeOf(gens)).len == 0) return HegelError.InvalidArgument;
+    if (std.meta.fieldNames(@TypeOf(gens)).len == 0) return HegelError.InvalidArgument;
     comptime assertSameValueTypes(@TypeOf(gens));
     return .{ .gens = gens };
 }
@@ -1753,7 +1753,7 @@ pub fn VariantGenerator(comptime Union: type, comptime Gens: type) type {
                 const index = try parseInteger(usize, items[0]);
                 return self.parseBranch(tc.allocator, index, items[1]);
             }
-            const index_gen = try integers(usize, .{ .min_value = 0, .max_value = std.meta.fields(Gens).len - 1 });
+            const index_gen = try integers(usize, .{ .min_value = 0, .max_value = std.meta.fieldNames(Gens).len - 1 });
             const index = try tc.draw(index_gen);
             return self.drawBranch(tc, index);
         }
@@ -1763,8 +1763,8 @@ pub fn VariantGenerator(comptime Union: type, comptime Gens: type) type {
             try encoder.map(2);
             try encoder.fieldText("type", "one_of");
             try encoder.text("generators");
-            try encoder.array(std.meta.fields(Gens).len);
-            inline for (std.meta.fields(Gens)) |meta_field| try @field(self.gens, meta_field.name).writeSchema(encoder);
+            try encoder.array(std.meta.fieldNames(Gens).len);
+            inline for (comptime std.meta.fieldNames(Gens)) |field_name| try @field(self.gens, field_name).writeSchema(encoder);
         }
 
         pub fn parseValue(self: @This(), allocator: std.mem.Allocator, value: cbor.Value) HegelError!Union {
@@ -1788,20 +1788,20 @@ pub fn VariantGenerator(comptime Union: type, comptime Gens: type) type {
         }
 
         fn parseBranch(self: @This(), allocator: std.mem.Allocator, index: usize, value: cbor.Value) HegelError!Union {
-            inline for (std.meta.fields(Union), 0..) |meta_field, i| {
+            inline for (comptime std.meta.fieldNames(Union), 0..) |field_name, i| {
                 if (index == i) {
-                    const parsed = try parseGeneratedValue(@field(self.gens, meta_field.name), allocator, value);
-                    return @unionInit(Union, meta_field.name, parsed);
+                    const parsed = try parseGeneratedValue(@field(self.gens, field_name), allocator, value);
+                    return @unionInit(Union, field_name, parsed);
                 }
             }
             return HegelError.UnexpectedEngineValue;
         }
 
         fn drawBranch(self: @This(), tc: *TestCase, index: usize) HegelError!Union {
-            inline for (std.meta.fields(Union), 0..) |meta_field, i| {
+            inline for (comptime std.meta.fieldNames(Union), 0..) |field_name, i| {
                 if (index == i) {
-                    const parsed = try tc.draw(@field(self.gens, meta_field.name));
-                    return @unionInit(Union, meta_field.name, parsed);
+                    const parsed = try tc.draw(@field(self.gens, field_name));
+                    return @unionInit(Union, field_name, parsed);
                 }
             }
             return HegelError.UnexpectedEngineValue;
@@ -1810,24 +1810,24 @@ pub fn VariantGenerator(comptime Union: type, comptime Gens: type) type {
 }
 
 pub fn variant(comptime Union: type, gens: anytype) HegelError!VariantGenerator(Union, @TypeOf(gens)) {
-    const union_fields = comptime std.meta.fields(Union);
-    const gen_fields = comptime std.meta.fields(@TypeOf(gens));
-    if (union_fields.len == 0 or union_fields.len != gen_fields.len) return HegelError.InvalidArgument;
-    inline for (union_fields) |meta_field| {
-        if (!@hasField(@TypeOf(gens), meta_field.name)) @compileError("variant generator tuple must use union field names");
+    const union_field_names = comptime std.meta.fieldNames(Union);
+    const gen_field_names = comptime std.meta.fieldNames(@TypeOf(gens));
+    if (union_field_names.len == 0 or union_field_names.len != gen_field_names.len) return HegelError.InvalidArgument;
+    inline for (union_field_names) |field_name| {
+        if (!@hasField(@TypeOf(gens), field_name)) @compileError("variant generator tuple must use union field names");
     }
     return .{ .gens = gens };
 }
 
 fn FirstValueType(comptime Gens: type) type {
-    const fields = std.meta.fields(Gens);
-    return @TypeOf(@field(@as(Gens, undefined), fields[0].name)).Value;
+    const field_names = comptime std.meta.fieldNames(Gens);
+    return @TypeOf(@field(@as(Gens, undefined), field_names[0])).Value;
 }
 
 fn assertSameValueTypes(comptime Gens: type) void {
     const First = FirstValueType(Gens);
-    inline for (std.meta.fields(Gens)) |meta_field| {
-        const This = @TypeOf(@field(@as(Gens, undefined), meta_field.name)).Value;
+    inline for (comptime std.meta.fieldNames(Gens)) |field_name| {
+        const This = @TypeOf(@field(@as(Gens, undefined), field_name)).Value;
         if (This != First) @compileError("oneOf requires all generators to have the same Value type");
     }
 }
@@ -2090,28 +2090,28 @@ pub fn BuildsGenerator(comptime T: type, comptime Gens: type) type {
         pub fn draw(self: @This(), tc: *TestCase) HegelError!T {
             var result: T = undefined;
             var initialized: usize = 0;
-            errdefer inline for (std.meta.fields(Gens), 0..) |gen_field, i| {
+            errdefer inline for (comptime std.meta.fieldNames(Gens), 0..) |gen_field_name, i| {
                 if (initialized > i) {
                     rootDeinitValue(
-                        @field(self.gens, gen_field.name),
+                        @field(self.gens, gen_field_name),
                         tc.allocator,
-                        &@field(result, std.meta.fields(T)[i].name),
+                        &@field(result, std.meta.fieldNames(T)[i]),
                     );
                 }
             };
-            inline for (std.meta.fields(Gens), 0..) |gen_field, i| {
-                @field(result, std.meta.fields(T)[i].name) = try tc.draw(@field(self.gens, gen_field.name));
+            inline for (comptime std.meta.fieldNames(Gens), 0..) |gen_field_name, i| {
+                @field(result, std.meta.fieldNames(T)[i]) = try tc.draw(@field(self.gens, gen_field_name));
                 initialized += 1;
             }
             return result;
         }
 
         pub fn deinitValue(self: @This(), allocator: std.mem.Allocator, value: *T) void {
-            inline for (std.meta.fields(Gens), 0..) |gen_field, i| {
+            inline for (comptime std.meta.fieldNames(Gens), 0..) |gen_field_name, i| {
                 rootDeinitValue(
-                    @field(self.gens, gen_field.name),
+                    @field(self.gens, gen_field_name),
                     allocator,
-                    &@field(value.*, std.meta.fields(T)[i].name),
+                    &@field(value.*, std.meta.fieldNames(T)[i]),
                 );
             }
         }
@@ -2121,12 +2121,12 @@ pub fn BuildsGenerator(comptime T: type, comptime Gens: type) type {
 fn validateBuildFields(comptime T: type, comptime Gens: type) void {
     const t_info = @typeInfo(T);
     if (t_info != .@"struct") @compileError("builds requires a struct result type");
-    const target_fields = std.meta.fields(T);
-    const gen_fields = std.meta.fields(Gens);
-    if (target_fields.len != gen_fields.len) @compileError("builds generator count must match struct field count");
-    inline for (gen_fields, 0..) |gen_field, i| {
-        const Expected = target_fields[i].type;
-        const Actual = @TypeOf(@field(@as(Gens, undefined), gen_field.name)).Value;
+    const target_field_types = comptime std.meta.fieldTypes(T);
+    const gen_field_names = comptime std.meta.fieldNames(Gens);
+    if (target_field_types.len != gen_field_names.len) @compileError("builds generator count must match struct field count");
+    inline for (gen_field_names, 0..) |gen_field_name, i| {
+        const Expected = target_field_types[i];
+        const Actual = @TypeOf(@field(@as(Gens, undefined), gen_field_name)).Value;
         if (Actual != Expected) @compileError("builds generator value type must match the target field type");
     }
 }
@@ -2163,14 +2163,14 @@ pub fn BuildsAggGenerator(comptime T: type, comptime Fields: type) type {
         pub fn draw(self: @This(), tc: *TestCase) HegelError!T {
             var result: T = undefined;
             var initialized: usize = 0;
-            errdefer inline for (std.meta.fields(Fields), 0..) |field_spec, i| {
+            errdefer inline for (comptime std.meta.fieldNames(Fields), 0..) |field_spec_name, i| {
                 if (initialized > i) {
-                    const spec = @field(self.fields, field_spec.name);
+                    const spec = @field(self.fields, field_spec_name);
                     rootDeinitValue(spec.generator, tc.allocator, &@field(result, @TypeOf(spec).name));
                 }
             };
-            inline for (std.meta.fields(Fields)) |field_spec| {
-                const spec = @field(self.fields, field_spec.name);
+            inline for (comptime std.meta.fieldNames(Fields)) |field_spec_name| {
+                const spec = @field(self.fields, field_spec_name);
                 @field(result, @TypeOf(spec).name) = try tc.draw(spec.generator);
                 initialized += 1;
             }
@@ -2178,8 +2178,8 @@ pub fn BuildsAggGenerator(comptime T: type, comptime Fields: type) type {
         }
 
         pub fn deinitValue(self: @This(), allocator: std.mem.Allocator, value: *T) void {
-            inline for (std.meta.fields(Fields)) |field_spec| {
-                const spec = @field(self.fields, field_spec.name);
+            inline for (comptime std.meta.fieldNames(Fields)) |field_spec_name| {
+                const spec = @field(self.fields, field_spec_name);
                 rootDeinitValue(spec.generator, allocator, &@field(value.*, @TypeOf(spec).name));
             }
         }
@@ -2187,11 +2187,11 @@ pub fn BuildsAggGenerator(comptime T: type, comptime Fields: type) type {
 }
 
 fn validateAllFieldsSpecified(comptime T: type, comptime Fields: type) void {
-    inline for (std.meta.fields(T)) |target_field| {
+    inline for (comptime std.meta.fieldNames(T)) |target_field_name| {
         comptime var found = false;
-        inline for (std.meta.fields(Fields)) |field_spec| {
-            const Spec = @TypeOf(@field(@as(Fields, undefined), field_spec.name));
-            if (std.mem.eql(u8, target_field.name, Spec.name)) found = true;
+        inline for (comptime std.meta.fieldNames(Fields)) |field_spec_name| {
+            const Spec = @TypeOf(@field(@as(Fields, undefined), field_spec_name));
+            if (std.mem.eql(u8, target_field_name, Spec.name)) found = true;
         }
         if (!found) @compileError("buildsAgg requires one field(...) specification for every result field");
     }
@@ -2199,14 +2199,14 @@ fn validateAllFieldsSpecified(comptime T: type, comptime Fields: type) void {
 
 fn validateFieldSpecs(comptime T: type, comptime Fields: type) void {
     if (@typeInfo(T) != .@"struct") @compileError("field-based generation requires a struct result type");
-    inline for (std.meta.fields(Fields), 0..) |field_spec, i| {
-        const Spec = @TypeOf(@field(@as(Fields, undefined), field_spec.name));
+    inline for (comptime std.meta.fieldNames(Fields), 0..) |field_spec_name, i| {
+        const Spec = @TypeOf(@field(@as(Fields, undefined), field_spec_name));
         if (!@hasDecl(Spec, "name") or !@hasDecl(Spec, "Generator")) {
             @compileError("buildsAgg and overrides require field(...) specifications");
         }
-        inline for (std.meta.fields(Fields), 0..) |other_field_spec, j| {
+        inline for (comptime std.meta.fieldNames(Fields), 0..) |other_field_spec_name, j| {
             if (i < j) {
-                const Other = @TypeOf(@field(@as(Fields, undefined), other_field_spec.name));
+                const Other = @TypeOf(@field(@as(Fields, undefined), other_field_spec_name));
                 if (std.mem.eql(u8, Spec.name, Other.name)) {
                     @compileError("field specifications must not name the same field twice");
                 }
@@ -2259,26 +2259,26 @@ pub fn DefaultGenerator(comptime T: type) type {
                 .@"struct" => |s| {
                     var result: T = undefined;
                     var initialized: usize = 0;
-                    errdefer inline for (s.fields, 0..) |meta_field, i| {
-                        if (initialized > i) defaultDeinitValue(tc.allocator, &@field(result, meta_field.name));
+                    errdefer inline for (s.field_names, 0..) |field_name, i| {
+                        if (initialized > i) defaultDeinitValue(tc.allocator, &@field(result, field_name));
                     };
-                    inline for (s.fields) |meta_field| {
-                        const gen = try defaultGenerator(meta_field.type);
-                        @field(result, meta_field.name) = try tc.draw(gen);
+                    inline for (s.field_names, s.field_types) |field_name, field_type| {
+                        const gen = try defaultGenerator(field_type);
+                        @field(result, field_name) = try tc.draw(gen);
                         initialized += 1;
                     }
                     return result;
                 },
                 .@"union" => |u| {
                     if (u.tag_type == null) return HegelError.UnsupportedType;
-                    if (u.fields.len == 0) return HegelError.UnsupportedType;
-                    const index_gen = try integers(usize, .{ .min_value = 0, .max_value = u.fields.len - 1 });
+                    if (u.field_names.len == 0) return HegelError.UnsupportedType;
+                    const index_gen = try integers(usize, .{ .min_value = 0, .max_value = u.field_names.len - 1 });
                     const index = try tc.draw(index_gen);
-                    inline for (u.fields, 0..) |union_field, i| {
+                    inline for (u.field_names, u.field_types, 0..) |field_name, field_type, i| {
                         if (index == i) {
-                            const gen = try defaultGenerator(union_field.type);
+                            const gen = try defaultGenerator(field_type);
                             const value = try tc.draw(gen);
-                            return @unionInit(T, union_field.name, value);
+                            return @unionInit(T, field_name, value);
                         }
                     }
                     return HegelError.UnexpectedEngineValue;
@@ -2304,19 +2304,19 @@ pub fn OverriddenDefaultGenerator(comptime T: type, comptime Fields: type) type 
             _ = self.base;
             var result: T = undefined;
             var initialized: usize = 0;
-            errdefer inline for (std.meta.fields(T), 0..) |target_field, i| {
-                if (initialized > i) self.deinitField(tc.allocator, &result, target_field.name);
+            errdefer inline for (comptime std.meta.fieldNames(T), 0..) |target_field_name, i| {
+                if (initialized > i) self.deinitField(tc.allocator, &result, target_field_name);
             };
-            inline for (std.meta.fields(T)) |target_field| {
-                try self.drawField(tc, &result, target_field.name, target_field.type);
+            inline for (comptime std.meta.fieldNames(T), comptime std.meta.fieldTypes(T)) |target_field_name, target_field_type| {
+                try self.drawField(tc, &result, target_field_name, target_field_type);
                 initialized += 1;
             }
             return result;
         }
 
         pub fn deinitValue(self: @This(), allocator: std.mem.Allocator, value: *T) void {
-            inline for (std.meta.fields(T)) |target_field| {
-                self.deinitField(allocator, value, target_field.name);
+            inline for (comptime std.meta.fieldNames(T)) |target_field_name| {
+                self.deinitField(allocator, value, target_field_name);
             }
         }
 
@@ -2327,8 +2327,8 @@ pub fn OverriddenDefaultGenerator(comptime T: type, comptime Fields: type) type 
             comptime field_name: []const u8,
             comptime FieldType: type,
         ) HegelError!void {
-            inline for (std.meta.fields(Fields)) |field_spec| {
-                const spec = @field(self.fields, field_spec.name);
+            inline for (comptime std.meta.fieldNames(Fields)) |field_spec_name| {
+                const spec = @field(self.fields, field_spec_name);
                 if (comptime std.mem.eql(u8, @TypeOf(spec).name, field_name)) {
                     @field(result.*, field_name) = try tc.draw(spec.generator);
                     return;
@@ -2339,8 +2339,8 @@ pub fn OverriddenDefaultGenerator(comptime T: type, comptime Fields: type) type 
         }
 
         fn deinitField(self: @This(), allocator: std.mem.Allocator, value: *T, comptime field_name: []const u8) void {
-            inline for (std.meta.fields(Fields)) |field_spec| {
-                const spec = @field(self.fields, field_spec.name);
+            inline for (comptime std.meta.fieldNames(Fields)) |field_spec_name| {
+                const spec = @field(self.fields, field_spec_name);
                 if (comptime std.mem.eql(u8, @TypeOf(spec).name, field_name)) {
                     rootDeinitValue(spec.generator, allocator, &@field(value.*, field_name));
                     return;

@@ -21,17 +21,26 @@ pub fn build(b: *std.Build) void {
     const hegel_rust_path = if (std.fs.path.isAbsolute(hegel_rust_path_rel))
         hegel_rust_path_rel
     else
-        b.pathJoin(&.{ b.build_root.path orelse ".", hegel_rust_path_rel });
+        b.pathJoin(&.{
+            b.root.toString(b.graph.arena) catch @panic("OOM"),
+            hegel_rust_path_rel,
+        });
 
-    const hegel_build = hegelRustBuildStep(b, hegel_rust_path, hegel_rust_path_option == null);
-    const hegel_lib = hegelRustStaticLibraryPath(b, hegel_rust_path, target.result);
+    const hegel_target_dir = hegelRustTargetDir(b, hegel_rust_path, target.result);
+    const hegel_build = hegelRustBuildStep(
+        b,
+        hegel_rust_path,
+        hegel_target_dir,
+        hegel_rust_path_option == null,
+    );
+    const hegel_lib = hegelRustStaticLibraryPath(b, hegel_target_dir, target.result);
 
     const mod = b.addModule("hegel_zig", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    linkHegel(mod, hegel_lib);
+    linkHegel(mod, hegel_lib, target);
 
     // Expose the hegel-rust static-library build as a named step so downstream
     // packages that import the `hegel_zig` module can depend on it before
@@ -59,18 +68,18 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the example");
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
+    run_cmd.addPassthruArgs();
     run_step.dependOn(&run_cmd.step);
 
     const mod_tests = b.addTest(.{ .root_module = mod });
     mod_tests.step.dependOn(hegel_build);
     const run_mod_tests = b.addRunArtifact(mod_tests);
-    if (b.args) |args| run_mod_tests.addArgs(args);
+    run_mod_tests.addPassthruArgs();
 
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
     exe_tests.step.dependOn(hegel_build);
     const run_exe_tests = b.addRunArtifact(exe_tests);
-    if (b.args) |args| run_exe_tests.addArgs(args);
+    run_exe_tests.addPassthruArgs();
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
@@ -80,6 +89,7 @@ pub fn build(b: *std.Build) void {
 fn hegelRustBuildStep(
     b: *std.Build,
     hegel_rust_path: []const u8,
+    hegel_target_dir: []const u8,
     should_clone_if_missing: bool,
 ) *std.Build.Step {
     var previous: ?*std.Build.Step = null;
@@ -109,6 +119,8 @@ fn hegelRustBuildStep(
         "--release",
         "--manifest-path",
         manifest_path,
+        "--target-dir",
+        hegel_target_dir,
     });
     if (previous) |step| cargo.step.dependOn(step);
     return &cargo.step;
@@ -116,17 +128,36 @@ fn hegelRustBuildStep(
 
 fn hegelRustStaticLibraryPath(
     b: *std.Build,
-    hegel_rust_path: []const u8,
+    hegel_target_dir: []const u8,
     target: std.Target,
 ) []const u8 {
     const lib_name = switch (target.os.tag) {
         .windows => "hegel_c.lib",
         else => "libhegel_c.a",
     };
-    return b.pathJoin(&.{ hegel_rust_path, "target", "release", lib_name });
+    return b.pathJoin(&.{ hegel_target_dir, "release", lib_name });
 }
 
-fn linkHegel(module: *std.Build.Module, hegel_lib: []const u8) void {
+fn hegelRustTargetDir(
+    b: *std.Build,
+    hegel_rust_path: []const u8,
+    target: std.Target,
+) []const u8 {
+    // Cargo's default target directory is shared by host platforms. Keep the
+    // archive and its object files separated so a Linux VM cannot link a
+    // previously built Darwin archive (or vice versa).
+    const target_name = b.fmt(
+        "target-{s}-{s}-{s}",
+        .{ @tagName(target.os.tag), @tagName(target.cpu.arch), @tagName(target.abi) },
+    );
+    return b.pathJoin(&.{ hegel_rust_path, target_name });
+}
+
+fn linkHegel(
+    module: *std.Build.Module,
+    hegel_lib: []const u8,
+    target: std.Build.ResolvedTarget,
+) void {
     // `hegel_lib` is an absolute path rooted at this package's build root (see
     // `build`). A `cwd_relative` LazyPath resolves against the cwd of the
     // linking invocation, but an absolute sub-path wins over that cwd, so the
@@ -134,4 +165,5 @@ fn linkHegel(module: *std.Build.Module, hegel_lib: []const u8) void {
     // imported from another package.
     module.addObjectFile(.{ .cwd_relative = hegel_lib });
     module.linkSystemLibrary("c", .{});
+    if (target.result.os.tag == .linux) module.linkSystemLibrary("unwind", .{});
 }
