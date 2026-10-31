@@ -6,6 +6,11 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const no_bin = b.option(bool, "no-bin", "type-check without installing the example binary") orelse false;
+    const supplied_library = b.option(
+        []const u8,
+        "hegel-rust-library",
+        "Use a supplied native Hegel archive instead of cloning or running Cargo",
+    );
     const hegel_rust_path_option = b.option(
         []const u8,
         "hegel-rust-path",
@@ -26,14 +31,22 @@ pub fn build(b: *std.Build) void {
             hegel_rust_path_rel,
         });
 
-    const hegel_target_dir = hegelRustTargetDir(b, hegel_rust_path, target.result);
-    const hegel_build = hegelRustBuildStep(
-        b,
-        hegel_rust_path,
-        hegel_target_dir,
-        hegel_rust_path_option == null,
-    );
-    const hegel_lib = hegelRustStaticLibraryPath(b, hegel_target_dir, target.result);
+    const hegel_rust_step = b.step("hegel-rust", "Prepare the hegel-rust static C library");
+    const hegel_lib = if (supplied_library) |path|
+        if (std.fs.path.isAbsolute(path)) path else b.pathJoin(&.{
+            b.root.toString(b.graph.arena) catch @panic("OOM"),
+            path,
+        })
+    else library: {
+        const hegel_target_dir = hegelRustTargetDir(b, hegel_rust_path, target.result);
+        hegel_rust_step.dependOn(hegelRustBuildStep(
+            b,
+            hegel_rust_path,
+            hegel_target_dir,
+            hegel_rust_path_option == null,
+        ));
+        break :library hegelRustStaticLibraryPath(b, hegel_target_dir, target.result);
+    };
 
     const mod = b.addModule("hegel_zig", .{
         .root_source_file = b.path("src/root.zig"),
@@ -42,12 +55,8 @@ pub fn build(b: *std.Build) void {
     });
     linkHegel(mod, hegel_lib, target);
 
-    // Expose the hegel-rust static-library build as a named step so downstream
-    // packages that import the `hegel_zig` module can depend on it before
-    // linking. Importing the module carries the object-file path but not the
-    // step that produces the file, so consumers must depend on this step.
-    const hegel_rust_step = b.step("hegel-rust", "Build the hegel-rust static C library");
-    hegel_rust_step.dependOn(hegel_build);
+    // Consumers depend on `hegel-rust` before linking. A supplied archive has
+    // an external producer; the linker still validates the archive it consumes.
 
     const exe = b.addExecutable(.{
         .name = "hegel_zig_example",
@@ -58,7 +67,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "hegel_zig", .module = mod }},
         }),
     });
-    exe.step.dependOn(hegel_build);
+    exe.step.dependOn(hegel_rust_step);
     if (no_bin) {
         b.getInstallStep().dependOn(&exe.step);
     } else {
@@ -72,12 +81,12 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     const mod_tests = b.addTest(.{ .root_module = mod });
-    mod_tests.step.dependOn(hegel_build);
+    mod_tests.step.dependOn(hegel_rust_step);
     const run_mod_tests = b.addRunArtifact(mod_tests);
     run_mod_tests.addPassthruArgs();
 
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
-    exe_tests.step.dependOn(hegel_build);
+    exe_tests.step.dependOn(hegel_rust_step);
     const run_exe_tests = b.addRunArtifact(exe_tests);
     run_exe_tests.addPassthruArgs();
 
