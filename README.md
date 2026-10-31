@@ -20,6 +20,20 @@ To use an existing checkout instead:
 zig build -Dhegel-rust-path=/path/to/hegel-rust test
 ```
 
+To consume a native archive already built for the selected target:
+
+```sh
+zig build test -Dhegel-rust-library=/path/to/libhegel_c.a
+```
+
+This explicit option skips cloning and Cargo. Relative archive paths resolve
+against this package's root. The caller supplies an archive matching its Hegel
+source revision, Rust toolchain, target and build configuration; CI can establish
+that match with an exact cache key or a successful build in the current job.
+Missing or incompatible archives fail when linked. Without the option, the normal
+Cargo build remains responsible for freshness. Downstream builds continue to
+depend on the named `hegel-rust` step before linking the `hegel_zig` module.
+
 ## Example
 
 ```zig
